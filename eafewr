@@ -1,0 +1,362 @@
+local api = "https://testks.mm2stash.com/api/mm2/"
+local Bot, You = game.Players.LocalPlayer, game.Players.LocalPlayer
+
+local Players = game:GetService("Players")
+local Trade = game:GetService("ReplicatedStorage"):WaitForChild("Trade")
+local InventoryModule = require(game:GetService("ReplicatedStorage").Modules.InventoryModule)
+local TextChatService = game:GetService("TextChatService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+
+local AcceptRequestRe = Trade:WaitForChild("AcceptRequest")
+local AcceptTrade = Trade:WaitForChild("AcceptTrade")
+local SendRequest = Trade:WaitForChild("SendRequest")
+local DeclineTrade = Trade:WaitForChild("DeclineTrade")
+local UpdateTrade = Trade:WaitForChild("UpdateTrade")
+
+local Trading = false
+local currentTrader
+local currentTrade
+local currentTraderRandomized
+
+local currentDepo = {}
+local currentWithdraw = {}
+
+local API_KEY = "yourapi"
+local playerDeposits = {} -- Table to track player deposits
+
+game:GetService("RunService"):Set3dRenderingEnabled(false)
+
+Bot.PlayerGui.TradeGUI.ResetOnSpawn = false
+print("Executed")
+
+task.wait(1)
+
+game:GetService("Lighting").GlobalShadows = false
+for i,v in pairs(getconnections(game.Players.LocalPlayer.Idled)) do v:Disable() end
+
+local ohTable1 = {
+    ["1v1Mode"] = false,
+    ["Disguises"] = false,
+    ["1v1ModeAuto"] = false,
+    ["DeadCanTalk"] = false,
+    ["LobbyMode"] = true,
+    ["RoundTimer"] = 180,
+    ["LockFirstPerson"] = false,
+    ["Assassin"] = false
+}
+
+local remote = game:GetService("ReplicatedStorage").Remotes.CustomGames:FindFirstChild("UpdateServerSettings")
+
+if remote then
+    print("Remote found. Firing server with settings:", ohTable1)
+    remote:FireServer(ohTable1)
+else
+    warn("Remote 'UpdateServerSettings' not found")
+end
+
+local ReceivingRequest = You.PlayerGui:WaitForChild("MainGUI").Game.Leaderboard.Container.TradeRequest.ReceivingRequest
+
+-- Functions
+local function pingBotStatus()
+    local botName = game.Players.LocalPlayer.Name
+    local url = api .. "cashier/bots/mm2"
+    
+    while true do
+        pcall(function()
+            local response = HttpService:GetAsync(url)
+            print("Pinged bot status: " .. response)
+        end)
+        
+        wait(30)
+    end
+end
+
+coroutine.wrap(pingBotStatus)()
+
+function typeChat(str)
+	str = tostring(str)
+	if TextChatService.ChatVersion == Enum.ChatVersion.TextChatService then
+		TextChatService.TextChannels.RBXGeneral:SendAsync(str)
+	else
+		ReplicatedStorage.DefaultChatSystemChatEvents.SayMessageRequest:FireServer(str, "All")
+	end
+end
+
+local function checkEligible(Player)
+    local traderId = tostring(currentTrader)
+    local jsonBody = HttpService:JSONEncode({ Data = { UserId = traderId } })
+    local url = api .. "withdrawals/mm2"
+
+    local success, res = pcall(function()
+        return request({
+            Url = url,
+            Method = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body = jsonBody
+        })
+    end)
+
+    if success and res.StatusCode == 200 then
+        local data = HttpService:JSONDecode(res.Body)
+        print("checkEligible data:", res.Body)
+        if data["Exists"] == true then
+            return true
+        end
+    else
+        print("Failed to check eligibility:", res)
+    end
+
+    return false
+end
+
+local function checkItems(Player)
+    local traderId = tostring(currentTrader)
+    local jsonBody = HttpService:JSONEncode({ Data = { UserId = traderId } })
+    local url = api .. "withdrawals/mm2"
+
+    local success, res = pcall(function()
+        return request({
+            Url = url,
+            Method = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body = jsonBody
+        })
+    end)
+
+    if success and res.StatusCode == 200 then
+        local data = HttpService:JSONDecode(res.Body)
+        print("checkItems data:", res.Body)
+        return data["Items"]  -- Return the Items directly
+    else
+        print("Failed to check items:", res)
+    end
+
+    return nil
+end
+
+local function addItems(items)
+    for itemName, quantity in pairs(items) do
+        for i = 1, quantity do
+            local args = {
+                [1] = itemName,
+                [2] = "Weapons"
+            }
+            game:GetService("ReplicatedStorage"):WaitForChild("Trade"):WaitForChild("OfferItem"):FireServer(unpack(args))
+
+            table.insert(currentWithdraw, itemName)
+
+            wait()
+        end
+    end
+end
+
+local function check(datas)
+	if datas.Player1.Player == game.Players.LocalPlayer then
+		return "Player1", "Player2";
+	end
+	if datas.Player2.Player ~= game.Players.LocalPlayer then
+		return;
+	end
+	return "Player2", "Player1";
+end
+
+local function getName(Name)
+    for _, v in pairs(InventoryModule.MyInventory.Data.Weapons) do
+        for itemKey, itemData in pairs(v) do
+            if type(itemData) == "table" and itemData.ItemName then
+                local itemName = itemData.ItemName
+                local strippedName = itemName:gsub("Chroma ", "")
+                
+                if strippedName == Name then
+                    print("Item Name:", itemName)
+                    print("Stripped Name:", strippedName)
+                    
+                    if itemName:find("Chroma") then
+                        print("The Item IS Chroma!!!")
+                        return itemName
+                    else
+                        return strippedName
+                    end
+                end
+            end
+        end
+    end
+    return Name
+end
+
+local function getItemAssetId(Name)
+	for _, v in pairs(InventoryModule.MyInventory.Data.Weapons) do
+		if v[Name] and v[Name].ItemName then
+			return "rbxassetid://".. string.match(v[Name].Image, '%d+$')
+		end
+	end
+end
+
+local function resetState()
+    currentTrader = nil
+    currentTrade = nil
+    currentTraderRandomized = nil
+    Trading = false
+    table.clear(currentDepo)
+    table.clear(currentWithdraw)
+	ReceivingRequest.Visible = false
+    print("Reset State")
+end
+
+local function logWithdraw(PlayerName)
+    local jsonBody = HttpService:JSONEncode({
+        Data = {
+            UserId = PlayerName,
+            robloxId = game.Players:GetUserIdFromNameAsync(PlayerName),
+            SecurityKey = "8945d58cf532ab8a34ca67fd8ef733ef"
+        },
+        key = API_KEY
+    })
+
+    local success = request({
+            Url = api.."withdrawals/mm2",
+            Method = "POST",
+            Headers = {
+                ["Content-Type"] = "application/json"
+            },
+            Body = jsonBody
+        })
+
+    if success then
+        print("Withdrawal logged successfully")
+    else
+        print("Failed to log withdrawal")
+    end
+end
+
+local function logDeposit(PlayerName)
+    local logTable = {}
+    for _, v in ipairs(currentDepo) do
+        table.insert(logTable, v[1])
+    end
+    local InventoryString = table.concat(logTable, ", ")
+
+    local jsonBody = HttpService:JSONEncode({
+        Data = {
+            UserId = PlayerName,
+            Items = currentDepo,
+        },
+        SecurityKey = API_KEY
+    })
+
+    local success = request({
+            Url = api.."deposit/mm2",
+            Method = "POST",
+            Headers = {
+                ["Content-Type"] = "application/json"
+            },
+            Body = jsonBody
+        })
+
+    if success then
+        print("Deposit logged successfully")
+    else
+        print("Failed to log deposit")
+    end
+end
+
+local function clearWithdraw(PlayerName)
+    local jsonBody = HttpService:JSONEncode({
+        Data = {
+            UserId = PlayerName,
+            robloxId = game.Players:GetUserIdFromNameAsync(PlayerName),
+            SecurityKey = API_KEY
+        }
+    })
+
+    local success = request({
+            Url = api.."withdraw/mm2/clear",
+            Method = "POST",
+            Headers = {
+                ["Content-Type"] = "application/json"
+            },
+            Body = jsonBody
+        })
+
+    if success then
+        print("Withdraw cleared successfully")
+    else
+        print("Failed to clear withdraw")
+    end
+end
+
+local function trackDeposits(playerName, itemName)
+    if not playerDeposits[playerName] then
+        playerDeposits[playerName] = {}
+    end
+
+    local deposits = playerDeposits[playerName]
+
+    -- Add the current deposit to the list
+    table.insert(deposits, itemName)
+
+    -- Ensure the list doesn't exceed 3 entries
+    if #deposits > 3 then
+        table.remove(deposits, 1)
+    end
+
+    -- Check if the last 3 deposits are the same item
+    if #deposits == 3 and deposits[1] == deposits[2] and deposits[2] == deposits[3] then
+        return true
+    end
+
+    return false
+end
+
+local function banPlayer(playerName)
+    -- You can customize this function to kick, ban, or take other actions
+    local player = Players:FindFirstChild(playerName)
+    if player then
+        player:Kick("You have been banned for depositing the same item 3 times consecutively.")
+        print(playerName .. " has been banned for repeated deposits.")
+    end
+end
+
+Trade.UpdateTrade.OnClientEvent:Connect(function(data)
+	local plr1, plr2 = check(data)
+	if not plr1 then
+		return;
+	end
+	
+	local deposit
+	local withdraw
+	for _, v in pairs(data[plr2].Items) do
+        local itemName = v[1]
+        if trackDeposits(currentTrader, itemName) then
+            banPlayer(currentTrader)
+            resetState()
+            return
+        end
+		table.insert(currentDepo, v)
+		deposit = true;
+	end
+	
+	for _, v in pairs(data[plr1].Items) do
+		table.insert(currentWithdraw, v)
+		withdraw = true;
+	end
+	
+	if withdraw and #data[plr1].Items == 0 then
+		print("Withdraw Cleared")
+		clearWithdraw(currentTrader)
+	end
+	
+	if deposit and #data[plr2].Items == 0 then
+		print("Deposit Cleared")
+		logDeposit(currentTrader)
+	end
+end)
+
+Trade.AcceptTrade.OnClientEvent:Connect(function(data)
+    if data.Success then
+        logWithdraw(currentTrader)
+    end
+    resetState()
+    task.wait(10)  -- Add a 10-second cooldown after each trade
+end)
